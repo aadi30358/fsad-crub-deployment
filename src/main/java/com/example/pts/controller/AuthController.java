@@ -54,15 +54,15 @@ public class AuthController {
     @Value("${google.clientId}")
     private String googleClientId;
 
-    public AuthController(UserRepository userRepository, 
-                          StudentRepository studentRepository, 
-                          EmployerRepository employerRepository,
-                          OfficerRepository officerRepository,
-                          JobRepository jobRepository,
-                          EmailService emailService,
-                          JwtUtils jwtUtils,
-                          PasswordEncoder passwordEncoder,
-                          AuthenticationManager authenticationManager) {
+    public AuthController(UserRepository userRepository,
+            StudentRepository studentRepository,
+            EmployerRepository employerRepository,
+            OfficerRepository officerRepository,
+            JobRepository jobRepository,
+            EmailService emailService,
+            JwtUtils jwtUtils,
+            PasswordEncoder passwordEncoder,
+            AuthenticationManager authenticationManager) {
         this.userRepository = userRepository;
         this.studentRepository = studentRepository;
         this.employerRepository = employerRepository;
@@ -81,20 +81,34 @@ public class AuthController {
                 return ResponseEntity.badRequest().body("Email cannot be empty.");
             }
 
-            if (userRepository.findByEmail(request.getEmail()).isPresent()) {
-                return ResponseEntity.badRequest().body("Email already registered.");
+            Optional<AppUser> userOpt = userRepository.findByEmail(request.getEmail());
+            if (userOpt.isEmpty()) {
+                return ResponseEntity.badRequest().body("Please send and verify OTP first.");
             }
 
-            AppUser user = new AppUser();
+            AppUser user = userOpt.get();
+
+            // Verify code
+            if (user.getVerificationCode() == null
+                    || !user.getVerificationCode().equals(request.getVerificationCode())) {
+                return ResponseEntity.badRequest().body("Invalid verification code.");
+            }
+            if (user.getVerificationCodeExpiry() == null
+                    || user.getVerificationCodeExpiry().isBefore(LocalDateTime.now())) {
+                return ResponseEntity.badRequest().body("Verification code has expired.");
+            }
+
             user.setName(request.getName());
-            user.setEmail(request.getEmail());
             user.setRole(request.getRole());
             user.setCompany(request.getCompany());
             user.setRoll(request.getRoll());
             user.setIsNewUser(true);
             user.setIsProfileComplete(false);
-
             user.setPassword(passwordEncoder.encode(request.getPassword()));
+
+            // Clear verification fields
+            user.setVerificationCode(null);
+            user.setVerificationCodeExpiry(null);
 
             AppUser savedUser = userRepository.save(user);
             autoCreateRoleEntry(savedUser);
@@ -104,6 +118,37 @@ public class AuthController {
             logger.error("Registration error for email {}: {}", request.getEmail(), e.getMessage(), e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body("Registration failed: " + e.getMessage());
+        }
+    }
+
+    @PostMapping("/send-verification-code")
+    public ResponseEntity<?> sendVerificationCode(@RequestBody Map<String, String> request) {
+        String email = request.get("email");
+        if (email == null || email.isEmpty()) {
+            return ResponseEntity.badRequest().body("Email is required.");
+        }
+
+        try {
+            Optional<AppUser> existingUser = userRepository.findByEmail(email);
+            if (existingUser.isPresent() && existingUser.get().getPassword() != null
+                    && !existingUser.get().getPassword().isEmpty()) {
+                // Check if it's a real user or just a placeholder
+                // If they have a password, they are registered.
+                return ResponseEntity.badRequest().body("Email already registered.");
+            }
+
+            AppUser user = existingUser.orElse(new AppUser());
+            user.setEmail(email);
+            String code = String.format("%06d", new java.util.Random().nextInt(999999));
+            user.setVerificationCode(code);
+            user.setVerificationCodeExpiry(LocalDateTime.now().plusMinutes(15));
+            userRepository.save(user);
+
+            emailService.sendVerificationCodeEmail(email, code);
+            return ResponseEntity.ok(Map.of("message", "Verification code sent to email."));
+        } catch (Exception e) {
+            logger.error("Error sending verification code: {}", e.getMessage(), e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("Failed to send verification code.");
         }
     }
 
@@ -143,15 +188,15 @@ public class AuthController {
     public ResponseEntity<?> loginUser(@RequestBody LoginRequestDTO loginRequest) {
         try {
             authenticationManager.authenticate(
-                new UsernamePasswordAuthenticationToken(loginRequest.getEmail(), loginRequest.getPassword())
-            );
+                    new UsernamePasswordAuthenticationToken(loginRequest.getEmail(), loginRequest.getPassword()));
 
             Optional<AppUser> userOptional = userRepository.findByEmail(loginRequest.getEmail());
             if (userOptional.isPresent()) {
                 AppUser user = userOptional.get();
 
                 // Allow admin role to bypass requested role validations
-                if (!user.getRole().equalsIgnoreCase("admin") && !user.getRole().equalsIgnoreCase(loginRequest.getRole())) {
+                if (!user.getRole().equalsIgnoreCase("admin")
+                        && !user.getRole().equalsIgnoreCase(loginRequest.getRole())) {
                     return ResponseEntity.status(401).body("Invalid role for this user.");
                 }
 
@@ -160,11 +205,12 @@ public class AuthController {
                 String token = jwtUtils.generateToken(user.getEmail(), user.getRole());
 
                 try {
-                    emailService.sendLoginNotificationEmail(user.getEmail(), user.getName(), jobRepository.findTop3ByOrderByIdDesc(), false);
+                    emailService.sendLoginNotificationEmail(user.getEmail(), user.getName(),
+                            jobRepository.findTop3ByOrderByIdDesc(), false);
                 } catch (Exception e) {
                     logger.error("Failed to send login notification: {}", e.getMessage());
                 }
-return ResponseEntity.ok(mapToAuthResponse(user, token));
+                return ResponseEntity.ok(mapToAuthResponse(user, token));
             }
             return ResponseEntity.status(404).body("User not found.");
         } catch (Exception e) {
@@ -182,7 +228,8 @@ return ResponseEntity.ok(mapToAuthResponse(user, token));
         }
 
         try {
-            GoogleIdTokenVerifier verifier = new GoogleIdTokenVerifier.Builder(new NetHttpTransport(), new GsonFactory())
+            GoogleIdTokenVerifier verifier = new GoogleIdTokenVerifier.Builder(new NetHttpTransport(),
+                    new GsonFactory())
                     .setAudience(Collections.singletonList(googleClientId))
                     .build();
 
@@ -196,12 +243,12 @@ return ResponseEntity.ok(mapToAuthResponse(user, token));
 
             if (idToken != null) {
                 GoogleIdToken.Payload payload = idToken.getPayload();
-                
+
                 String email = payload.getEmail();
                 String name = (String) payload.get("name");
                 String pictureUrl = (String) payload.get("picture");
 
-                Optional<AppUser> userOpt = userRepository.findByEmail(email);  
+                Optional<AppUser> userOpt = userRepository.findByEmail(email);
                 AppUser user;
                 boolean isNewUser = false;
                 if (userOpt.isPresent()) {
@@ -223,11 +270,12 @@ return ResponseEntity.ok(mapToAuthResponse(user, token));
                     user = userRepository.save(user);
                     autoCreateRoleEntry(user);
                 }
-                
+
                 String token = jwtUtils.generateToken(user.getEmail(), user.getRole());
 
                 try {
-                    emailService.sendLoginNotificationEmail(email, name, jobRepository.findTop3ByOrderByIdDesc(), isNewUser);
+                    emailService.sendLoginNotificationEmail(email, name, jobRepository.findTop3ByOrderByIdDesc(),
+                            isNewUser);
                 } catch (Exception e) {
                     logger.error("Failed to trigger login notification: {}", e.getMessage());
                 }
@@ -238,7 +286,8 @@ return ResponseEntity.ok(mapToAuthResponse(user, token));
             }
         } catch (Exception e) {
             logger.error("Error processing Google login: {}", e.getMessage(), e);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("Error processing Google login: " + e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("Error processing Google login: " + e.getMessage());
         }
     }
 
@@ -259,14 +308,14 @@ return ResponseEntity.ok(mapToAuthResponse(user, token));
     public ResponseEntity<?> forgotPassword(@RequestBody Map<String, String> request) {
         String email = request.get("email");
         Optional<AppUser> userOpt = userRepository.findByEmail(email);
-        
+
         if (userOpt.isPresent()) {
             AppUser user = userOpt.get();
             String otp = String.format("%06d", new java.util.Random().nextInt(999999));
             user.setResetToken(otp);
             user.setResetTokenExpiry(java.time.LocalDateTime.now().plusMinutes(15));
             userRepository.save(user);
-            
+
             emailService.sendPasswordResetEmail(email, otp);
             return ResponseEntity.ok(Map.of("message", "OTP sent to your email."));
         }
@@ -291,9 +340,9 @@ return ResponseEntity.ok(mapToAuthResponse(user, token));
     public ResponseEntity<?> resetPassword(@RequestBody Map<String, String> request) {
         String otp = request.get("otp");
         String newPassword = request.get("newPassword");
-        
+
         Optional<AppUser> userOpt = userRepository.findByResetToken(otp);
-        
+
         if (userOpt.isPresent()) {
             AppUser user = userOpt.get();
             if (user.getResetTokenExpiry().isAfter(java.time.LocalDateTime.now())) {
@@ -313,9 +362,12 @@ return ResponseEntity.ok(mapToAuthResponse(user, token));
         Optional<AppUser> userOpt = userRepository.findById(id);
         if (userOpt.isPresent()) {
             AppUser user = userOpt.get();
-            if (updates.getName() != null) user.setName(updates.getName());
-            if (updates.getCompany() != null) user.setCompany(updates.getCompany());
-            if (updates.getRoll() != null) user.setRoll(updates.getRoll());
+            if (updates.getName() != null)
+                user.setName(updates.getName());
+            if (updates.getCompany() != null)
+                user.setCompany(updates.getCompany());
+            if (updates.getRoll() != null)
+                user.setRoll(updates.getRoll());
             user.setIsProfileComplete(true);
             return ResponseEntity.ok(userRepository.save(user));
         }

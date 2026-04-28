@@ -10,4 +10,5 @@ public class RegisterRequestDTO {
     private String role;
     private String roll;
     private String company;
+    private String verificationCode;
 }

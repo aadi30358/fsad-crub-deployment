@@ -14,15 +14,15 @@ public class AppUser {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
-    
+
     private String name;
-    
+
     @Column(unique = true)
     private String email;
 
     private String password;
     private String role;
-    
+
     private String profilePicture;
 
     // Optional fields depending on role setup
@@ -34,6 +34,10 @@ public class AppUser {
     // Reset password fields
     private String resetToken;
     private java.time.LocalDateTime resetTokenExpiry;
+
+    // Registration verification fields
+    private String verificationCode;
+    private java.time.LocalDateTime verificationCodeExpiry;
 
     @Transient
     private String token;
