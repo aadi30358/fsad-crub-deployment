@@ -15,10 +15,6 @@ import com.example.pts.repository.OfficerRepository;
 import com.example.pts.repository.JobRepository;
 import com.example.pts.security.JwtUtils;
 import com.example.pts.service.EmailService;
-import com.google.api.client.googleapis.auth.oauth2.GoogleIdToken;
-import com.google.api.client.googleapis.auth.oauth2.GoogleIdTokenVerifier;
-import com.google.api.client.http.javanet.NetHttpTransport;
-import com.google.api.client.json.gson.GsonFactory;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -30,10 +26,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.LocalDateTime;
-import java.util.Collections;
 import java.util.Map;
 import java.util.Optional;
-import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/auth")
@@ -113,7 +107,10 @@ public class AuthController {
             AppUser savedUser = userRepository.save(user);
             autoCreateRoleEntry(savedUser);
 
-            return ResponseEntity.ok(mapToAuthResponse(savedUser, null));
+            // Generate token for auto-login
+            String token = jwtUtils.generateToken(savedUser.getEmail(), savedUser.getRole());
+
+            return ResponseEntity.ok(mapToAuthResponse(savedUser, token));
         } catch (Exception e) {
             logger.error("Registration error for email {}: {}", request.getEmail(), e.getMessage(), e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
@@ -215,79 +212,6 @@ public class AuthController {
             return ResponseEntity.status(404).body("User not found.");
         } catch (Exception e) {
             return ResponseEntity.status(401).body("Invalid credentials: " + e.getMessage());
-        }
-    }
-
-    @PostMapping("/google")
-    public ResponseEntity<?> googleLogin(@RequestBody Map<String, String> request) {
-        String idTokenString = request.get("credential");
-        String requestedRole = request.get("role");
-
-        if (idTokenString == null || idTokenString.isEmpty()) {
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body("Missing Google ID token.");
-        }
-
-        try {
-            GoogleIdTokenVerifier verifier = new GoogleIdTokenVerifier.Builder(new NetHttpTransport(),
-                    new GsonFactory())
-                    .setAudience(Collections.singletonList(googleClientId))
-                    .build();
-
-            GoogleIdToken idToken;
-            try {
-                idToken = verifier.verify(idTokenString);
-            } catch (IllegalArgumentException e) {
-                logger.error("Invalid Google Token format.", e);
-                return ResponseEntity.status(HttpStatus.BAD_REQUEST).body("Invalid Google Token format.");
-            }
-
-            if (idToken != null) {
-                GoogleIdToken.Payload payload = idToken.getPayload();
-
-                String email = payload.getEmail();
-                String name = (String) payload.get("name");
-                String pictureUrl = (String) payload.get("picture");
-
-                Optional<AppUser> userOpt = userRepository.findByEmail(email);
-                AppUser user;
-                boolean isNewUser = false;
-                if (userOpt.isPresent()) {
-                    user = userOpt.get();
-                    if (pictureUrl != null) {
-                        user.setProfilePicture(pictureUrl);
-                        user = userRepository.save(user);
-                    }
-                } else {
-                    isNewUser = true;
-                    user = new AppUser();
-                    user.setEmail(email);
-                    user.setName(name);
-                    user.setProfilePicture(pictureUrl);
-                    user.setRole(requestedRole != null ? requestedRole : "student");
-                    user.setIsNewUser(true);
-                    user.setIsProfileComplete(false);
-                    user.setPassword(passwordEncoder.encode(UUID.randomUUID().toString()));
-                    user = userRepository.save(user);
-                    autoCreateRoleEntry(user);
-                }
-
-                String token = jwtUtils.generateToken(user.getEmail(), user.getRole());
-
-                try {
-                    emailService.sendLoginNotificationEmail(email, name, jobRepository.findTop3ByOrderByIdDesc(),
-                            isNewUser);
-                } catch (Exception e) {
-                    logger.error("Failed to trigger login notification: {}", e.getMessage());
-                }
-
-                return ResponseEntity.ok(mapToAuthResponse(user, token));
-            } else {
-                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Invalid ID token. Verification failed.");
-            }
-        } catch (Exception e) {
-            logger.error("Error processing Google login: {}", e.getMessage(), e);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body("Error processing Google login: " + e.getMessage());
         }
     }
 
